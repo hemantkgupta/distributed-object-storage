@@ -1,0 +1,15 @@
+version: '3.8'
+services:
+  metadata-db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: object_metadata
+      POSTGRES_USER: objectadmin
+      POSTGRES_PASSWORD: objectpassword
+    ports:
+      - "6432:5432"
+    volumes:
+      - metadata_data:/var/lib/postgresql/data
+
+volumes:
+  metadata_data:
