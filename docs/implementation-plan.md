@@ -54,21 +54,95 @@
 - Throttle I/O to avoid competing with production reads and writes.
 - Target: full scan cycle verifies every shard at least once per week.
 
-## Phase 5: Repair Orchestrator — Planned
+## Phase 4: Foundation Contracts and Domain Model — Done
 
-- Detect missing/corrupted shards from scrubber reports, health monitor, or read-time checksum failures.
-- Fetch k surviving shards from other storage nodes.
-- Reconstruct missing shard via erasure decode.
-- Write replacement shard to a healthy node (selected by consistent hash ring).
-- Update `shard_locations` in metadata to reflect new placement.
-- Priority queue: objects with fewer surviving shards are repaired first.
+- Defined `StorageNode` interface with listShards(), shardChecksum(), health().
+- Implemented `LocalFilesystemStorageNode` backed by local filesystem directories.
+- Defined `PlacementPolicy` interface with failure domain enforcement.
+- Implemented `TopologyAwarePlacementPolicy` wrapping ConsistentHashRing with rack/AZ constraint checking.
+- Added domain model records: ShardId, StorageNodeHealth, FailureDomain, PlacementPlan.
+- Added repair domain model: RepairTask, RepairResult, RepairBudget, RepairLease, RepairOutcome, RepairPriority.
+- Added scrub domain model: ScrubResult, ScrubOutcome.
+- Added GC domain model: GCResult.
 
-## Phase 6: GC Service — Planned
+### Phase 4 Code Map
 
-- Orphan shard cleanup: scan storage nodes for shards with no corresponding metadata reference. Delete them.
-- Abandoned multipart upload cleanup: scan for `INITIATED` uploads older than configurable threshold (default 7 days). Abort them — delete parts, delete shards.
+- `storage/StorageNode.java` — interface: read/write/delete/list/checksum/health
+- `storage/LocalFilesystemStorageNode.java` — filesystem implementation with MD5 checksumming
+- `storage/ShardId.java` — nodeId + physicalShardId record
+- `storage/StorageNodeHealth.java` — capacity, usage, shard count, health flag
+- `placement/PlacementPolicy.java` — interface: place shards under failure domain constraints
+- `placement/TopologyAwarePlacementPolicy.java` — ring + domain enforcement + capacity warnings
+- `placement/FailureDomain.java` — (type, value) label for rack/AZ/power
+- `placement/PlacementPlan.java` — shard → node assignments + warnings
+- `model/ScrubResult.java`, `model/ScrubOutcome.java` — per-shard scrub outcome
+- `model/RepairTask.java`, `model/RepairResult.java`, `model/RepairBudget.java` — repair domain
+- `model/RepairLease.java`, `model/RepairOutcome.java`, `model/RepairPriority.java` — lease + priority
+- `model/GCResult.java` — GC run outcome
 
-## Phase 7: Module Split — Planned
+## Phase 5: Scrubber — Done
+
+- Defined `ShardScrubber` interface with budgeted `scrubNode()`.
+- Implemented `BackgroundScrubber` with persistent per-node scan cursor.
+- Cursor-based inventory walk: sorted shard list, resume from last position.
+- Checksum verification: compute MD5 of shard bytes, compare to expected from metadata.
+- Mismatch/missing → enqueue RepairTask via RepairTaskQueue. Does NOT delete or repair inline.
+- Budget enforcement: stops after maxShardsPerRun or maxDuration.
+
+### Phase 5 Code Map
+
+- `scrubber/ShardScrubber.java` — interface
+- `scrubber/BackgroundScrubber.java` — persistent cursor, checksum comparison, repair task enqueuing
+- `scrubber/ScrubBudget.java` — max shards per run + max duration
+- `scrubber/ScrubSummary.java` — counts (clean/corrupt/missing/errors) + resume cursor
+
+## Phase 6: Repair Orchestrator — Done
+
+- Defined `RepairOrchestrator` interface.
+- Implemented `ErasureRepairOrchestrator` with fenced lease coordination.
+- Algorithm: acquire lease → read metadata → fetch surviving shards → erasure decode → re-encode → write missing shards to healthy nodes → update metadata → release lease.
+- Defined `RepairLeaseStore` interface with fencing tokens.
+- Implemented `InMemoryRepairLeaseStore` with ConcurrentHashMap and monotonic AtomicLong tokens.
+- Defined `RepairTaskQueue` interface with priority ordering.
+- Implemented `InMemoryRepairTaskQueue` with ConcurrentHashMap and priority+schedule sorting.
+
+### Phase 6 Code Map
+
+- `repair/RepairOrchestrator.java` — interface: repair(task, budget) → RepairResult
+- `repair/ErasureRepairOrchestrator.java` — full repair flow with lease, decode, place, metadata CAS
+- `repair/RepairLeaseStore.java` — interface: tryAcquire, release, loadActiveLeases
+- `repair/InMemoryRepairLeaseStore.java` — ConcurrentHashMap, monotonic fencing tokens
+- `repair/RepairTaskQueue.java` — interface: enqueue, dueTasks, markCompleted, reschedule
+- `repair/InMemoryRepairTaskQueue.java` — priority ordering, due filtering
+
+## Phase 7: GC Service — Done
+
+- Defined `GarbageCollector` interface.
+- Implemented `OrphanAndLifecycleGC` with quarantine-before-purge semantics.
+- Orphan detection: scan all storage nodes, compare shard inventory against metadata references.
+- Grace period enforcement: orphans tracked by first-seen time, purged only after grace period.
+- Abandoned multipart cleanup: INITIATED uploads older than configurable max age → auto-abort.
+
+### Phase 7 Code Map
+
+- `gc/GarbageCollector.java` — interface: collect(policy) → GCResult
+- `gc/OrphanAndLifecycleGC.java` — orphan quarantine + abandoned upload abort
+- `gc/GCPolicy.java` — orphanGracePeriod + abandonedUploadMaxAge
+
+## Phase 8: Gateway Controller Refactor — Done
+
+- Extracted business logic from `StorageGatewayController` into three service classes.
+- Controller is now a thin HTTP adapter with no business logic.
+- Matches KV store's pattern: `CoordinatorService` owns logic, HTTP handlers are thin.
+
+### Phase 8 Code Map
+
+- `service/PutObjectService.java` — checksum → encode → place → write → persist
+- `service/GetObjectService.java` — metadata → fetch → decode → verify (returns GetResult record)
+- `service/DeleteObjectService.java` — metadata → delete shards → delete metadata
+- `controller/StorageGatewayController.java` — thin adapter delegating to services
+
+## Phase 9: Module Split — Planned
 
 - Split monolith into Gradle modules matching the blog's service boundaries:
   - `storage-gateway` — StorageGatewayController, MultipartUploadController
@@ -85,9 +159,9 @@
 |---|---|---|
 | Distributed metadata (Cassandra/CockroachDB) | Single-node PostgreSQL | Multi-node not needed for local dev |
 | Distributed storage nodes (separate hosts) | Local filesystem directories per node | Same read/write/delete contract |
-| Background scrubber daemon | Not implemented | Blog describes architecture; Phase 4 |
-| Repair orchestrator | Not implemented | Blog describes architecture; Phase 5 |
-| GC service | Not implemented | Blog describes architecture; Phase 6 |
+| Background scrubber daemon | `BackgroundScrubber.java` — persistent cursor, budgeted, checksum verification | ✅ Implemented (Phase 5) |
+| Repair orchestrator | `ErasureRepairOrchestrator.java` — fenced leases, decode, replace, metadata update | ✅ Implemented (Phase 6) |
+| GC service | `OrphanAndLifecycleGC.java` — quarantine-before-purge, abandoned upload abort | ✅ Implemented (Phase 7) |
 | Failure domain placement (rack/power awareness) | Not enforced | Blog describes constraint; ring walk skips but doesn't check racks |
 | Cross-datacenter replication | Not implemented | Blog describes for extreme resilience |
 | SIMD-optimized erasure coding | Pure-Java GF(2^8) table lookup | Sufficient for project throughput; see ADR 0001 |

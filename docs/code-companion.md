@@ -12,17 +12,63 @@ When the blog claims a mechanism exists, this companion must point to the file o
 |---|---|---|
 | Part 1: Problem + Numbers | — | Architecture only — no corresponding code |
 | Part 2: System Overview | All source files | Architecture diagram; component inventory matches source tree |
-| Part 3: Write Path (PUT) | `controller/StorageGatewayController.java` (`putObject`) | Implemented — 5-step flow: checksum → encode → hash ring → write shards → persist metadata |
+| Part 3: Write Path (PUT) | `service/PutObjectService.java`, `controller/StorageGatewayController.java` (thin adapter) | Implemented — 5-step flow: checksum → encode → hash ring → write shards → persist metadata |
 | Part 4: Erasure Coding | `erasure/ErasureCodingService.java` | Implemented — self-contained GF(2^8), generator matrix, encode(), decode() with Gaussian elimination |
 | Part 5: Metadata Service | `model/ObjectMetadata.java`, `repository/MetadataRepository.java`, `resources/db/migration/V1__init.sql` | Implemented — JPA entity with shardLocations JSON, Flyway migration |
-| Part 5: Placement Service | `routing/ConsistentHashRing.java` | Implemented — 150 vnodes, SHA-256, TreeMap ring, addNode/removeNode |
-| Part 6: Read Path (GET) | `controller/StorageGatewayController.java` (`getObject`) | Implemented — metadata lookup → fetch all shards → present[] tracking → decode → checksum verify → 200 or 409 |
+| Part 5: Placement Service | `routing/ConsistentHashRing.java`, `placement/PlacementPolicy.java`, `placement/TopologyAwarePlacementPolicy.java`, `placement/FailureDomain.java`, `placement/PlacementPlan.java` | Implemented — 150 vnodes, SHA-256, failure domain enforcement |
+| Part 6: Read Path (GET) | `service/GetObjectService.java`, `controller/StorageGatewayController.java` (thin adapter) | Implemented — metadata lookup → fetch all shards → present[] tracking → decode → checksum verify → 200 or 409 |
 | Part 7: Multipart Upload | `multipart/MultipartUploadController.java`, `MultipartUpload.java`, `UploadPart.java`, `UploadPartRepository.java`, `MultipartUploadRepository.java` | Implemented — 4-step S3 protocol, per-part erasure coding, idempotent retry, composite ETag, abort |
-| Part 7: GC Service | — | Not yet implemented — blog describes architecture (lifecycle cleanup of abandoned uploads) |
-| Part 8: Scrubber | — | Not yet implemented — blog describes architecture (per-node checksum verification) |
-| Part 8: Repair Orchestrator | — | Not yet implemented — blog describes architecture (detect → reconstruct → write replacement → update metadata) |
+| Part 7: GC Service | `gc/GarbageCollector.java`, `gc/OrphanAndLifecycleGC.java`, `gc/GCPolicy.java` | Implemented — orphan quarantine-before-purge, abandoned multipart auto-abort |
+| Part 8: Scrubber | `scrubber/ShardScrubber.java`, `scrubber/BackgroundScrubber.java`, `scrubber/ScrubBudget.java`, `scrubber/ScrubSummary.java` | Implemented — persistent cursor, budgeted scanning, checksum verification, repair task enqueuing |
+| Part 8: Repair Orchestrator | `repair/RepairOrchestrator.java`, `repair/ErasureRepairOrchestrator.java` | Implemented — fenced lease, surviving shard fetch, erasure decode, replacement placement, metadata update |
+| Part 8: Repair Leases | `repair/RepairLeaseStore.java`, `repair/InMemoryRepairLeaseStore.java` | Implemented — fencing tokens, acquire/release, expiry |
+| Part 8: Repair Queue | `repair/RepairTaskQueue.java`, `repair/InMemoryRepairTaskQueue.java` | Implemented — priority ordering, due tasks, reschedule |
 | Part 8: Durability Math | — | Architecture only — MTTR × AFR probability model, no corresponding code |
 | Part 9: Failure Modes | — | Architecture only — no failure injection code |
+
+## Storage Abstraction
+
+| Contract | Implementation | Test |
+|---|---|---|
+| `storage/StorageNode.java` | `storage/LocalFilesystemStorageNode.java` | — |
+| `placement/PlacementPolicy.java` | `placement/TopologyAwarePlacementPolicy.java` | — |
+| `scrubber/ShardScrubber.java` | `scrubber/BackgroundScrubber.java` | — |
+| `repair/RepairOrchestrator.java` | `repair/ErasureRepairOrchestrator.java` | — |
+| `repair/RepairLeaseStore.java` | `repair/InMemoryRepairLeaseStore.java` | — |
+| `repair/RepairTaskQueue.java` | `repair/InMemoryRepairTaskQueue.java` | — |
+| `gc/GarbageCollector.java` | `gc/OrphanAndLifecycleGC.java` | — |
+
+## Domain Model
+
+| Record/Enum | Package | Purpose |
+|---|---|---|
+| `ShardId` | storage | Node ID + physical shard ID |
+| `StorageNodeHealth` | storage | Capacity, usage, shard count, healthy flag |
+| `FailureDomain` | placement | Rack/AZ/power constraint label |
+| `PlacementPlan` | placement | Shard → node assignments + warnings |
+| `ScrubResult` | model | Per-shard scrub outcome |
+| `ScrubOutcome` | model | CLEAN, CHECKSUM_MISMATCH, MISSING, READ_ERROR |
+| `ScrubBudget` | scrubber | Max shards per run + max duration |
+| `ScrubSummary` | scrubber | Counts + resume cursor |
+| `RepairTask` | model | Pending repair: object, shard index, priority, schedule |
+| `RepairResult` | model | Repair outcome: shards read/written, detail |
+| `RepairBudget` | model | Max concurrent, max reads, max writes |
+| `RepairLease` | model | Task lock with fencing token and expiry |
+| `RepairOutcome` | model | REPAIRED, INSUFFICIENT_SHARDS, LEASE_CONFLICT, BUDGET_EXHAUSTED, FAILED |
+| `RepairPriority` | model | CRITICAL (4/6), HIGH (5/6), NORMAL (6/6) |
+| `GCResult` | model | Orphans quarantined/purged, uploads aborted |
+| `GCPolicy` | gc | Grace period + abandoned upload max age |
+
+## Gateway Decomposition
+
+The gateway controller was refactored into thin adapter + service layer:
+
+| Component | File | Responsibility |
+|---|---|---|
+| HTTP adapter | `controller/StorageGatewayController.java` | Translate HTTP → service calls → HTTP responses |
+| PUT service | `service/PutObjectService.java` | Checksum → encode → place → write → persist |
+| GET service | `service/GetObjectService.java` | Metadata → fetch → decode → verify |
+| DELETE service | `service/DeleteObjectService.java` | Metadata → delete shards → delete metadata |
 
 ## Key Implementation Details
 
@@ -32,39 +78,29 @@ When the blog claims a mechanism exists, this companion must point to the file o
 - EXP/LOG tables: 512/256 entries, precomputed in static initializer
 - Multiplication: `gfMul(a, b) = EXP[LOG[a] + LOG[b]]` — O(1) per byte
 - Generator matrix: k=4 identity rows + m=2 Vandermonde rows
-  - Row 4 = [1, 1, 1, 1] (XOR of all data shards)
-  - Row 5 = [1, 2, 4, 8] (α^0, α^1, α^2, α^3 where α=2)
-- Decode: select k available shards → extract submatrix → invert via Gaussian elimination in GF(2^8) → multiply inverse × shard bytes
+- Decode: select k available → extract submatrix → invert via Gaussian elimination → multiply
 - Blog code excerpts match the actual source file exactly
 
-### Consistent Hash Ring (blog Part 5 → `ConsistentHashRing.java`)
+### Scrubber (blog Part 8 → `BackgroundScrubber.java`)
 
-- 150 virtual nodes per physical node
-- Hash function: SHA-256 → first 8 bytes as signed long
-- Ring data structure: `TreeMap<Long, Integer>` (hash → physical nodeId)
-- `getNode(shardId)`: hash → tailMap → first key (clockwise walk) → wrap to firstKey if past end
-- Placement stored at write time in `ObjectMetadata.shardLocations` — never re-derived from ring on GET
-- Blog code excerpts match the actual source file exactly
+- Persistent cursor per node (resumes from last position)
+- Sorted shard inventory walk with budget enforcement
+- Checksum comparison against metadata store
+- Creates RepairTask on mismatch/missing — does NOT delete or repair inline
+- Orphan shards (no metadata reference) skipped — that's GC's responsibility
 
-### Multipart Protocol (blog Part 7 → `MultipartUploadController.java`)
+### Repair Orchestrator (blog Part 8 → `ErasureRepairOrchestrator.java`)
 
-- Initiate: creates `multipart_upload` row with status INITIATED
-- Upload part: erasure-codes part independently, stores per-part shard map in `upload_part` row, returns ETag
-- Idempotent retry: detects existing part via UNIQUE(upload_id, part_number), deletes old shards before overwrite
-- Complete: verifies manifest ETags, assembles composite `object_metadata` row, computes S3-style composite ETag
-- Abort: deletes all part shards, marks ABORTED
-- Blog code excerpts match the actual source file exactly
+- Acquires fenced repair lease before starting
+- Reads metadata for shard locations
+- Fetches all shards, tracks present[] array
+- Erasure-decodes to reconstruct original, re-encodes to get all shards
+- Writes missing shards to healthy replacement nodes
+- Updates metadata shard_locations JSON
+- Releases lease in finally block (always releases, even on failure)
 
-### Storage-First, Metadata-Second (blog Part 3 → `StorageGatewayController.putObject()`)
+### GC Service (blog Part 7 → `OrphanAndLifecycleGC.java`)
 
-- Gateway writes shards to storage nodes (step 3) before persisting metadata (step 4)
-- Crash between 3 and 4 → orphaned shards (harmless, cleaned by future GC service)
-- Reverse ordering → metadata references missing shards (correctness failure)
-- Blog explains both failure scenarios; code implements the correct ordering
-
-### Checksum Verification (blog Part 6 → `StorageGatewayController.getObject()`)
-
-- MD5 computed on PUT, stored in `ObjectMetadata.checksum`
-- On every GET: MD5 of reconstructed bytes compared to stored checksum
-- Mismatch → HTTP 409 Conflict (not 200 with corrupt data)
-- Blog explains the three things checksum catches: bit rot, decode bugs, metadata corruption
+- Quarantine-before-purge: orphans tracked by first-seen time, only deleted after grace period
+- Abandoned uploads: INITIATED status older than max age → auto-abort
+- Full metadata scan to build referenced shard set — appropriate for periodic GC, not hot path
