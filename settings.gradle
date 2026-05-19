@@ -1,1 +1,27 @@
 rootProject.name = 'distributed-object-storage'
+
+// Foundation
+include 'obj-common'
+
+// Erasure + routing primitives
+include 'obj-erasure'
+include 'obj-routing'
+
+// Placement + storage backend
+include 'obj-placement'
+include 'obj-storage'
+
+// Persistence + S3-shaped APIs
+include 'obj-metadata'
+include 'obj-multipart'
+
+// Data path
+include 'obj-gateway'
+
+// Background control plane
+include 'obj-scrubber'
+include 'obj-repair'
+include 'obj-gc'
+
+// Executable Spring Boot application
+include 'obj-gateway-app'

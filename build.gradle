@@ -1,44 +1,148 @@
 plugins {
-    id 'java'
-    id 'org.springframework.boot' version '3.2.4'
-    id 'io.spring.dependency-management' version '1.1.4'
+    // Boot plugin is declared at the root so dependency-management's BOM applies
+    // to subprojects, but it is NOT applied at the root. The executable module
+    // opts in via its own build.gradle.
+    id 'org.springframework.boot'        version '3.2.4' apply false
+    id 'io.spring.dependency-management' version '1.1.4' apply false
 }
 
-group = 'com.systemdesign'
-version = '0.0.1-SNAPSHOT'
+allprojects {
+    group   = 'com.systemdesign'
+    version = '0.1.0-SNAPSHOT'
 
-java {
-    sourceCompatibility = '17'
-    targetCompatibility = '17'
+    repositories {
+        mavenCentral()
+    }
 }
 
-repositories {
-    mavenCentral()
+subprojects {
+    apply plugin: 'java-library'
+    apply plugin: 'io.spring.dependency-management'
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(17)
+        }
+    }
+
+    dependencyManagement {
+        imports {
+            mavenBom 'org.springframework.boot:spring-boot-dependencies:3.2.4'
+        }
+    }
+
+    dependencies {
+        // Every library module may carry Spring stereotype annotations (@Service,
+        // @Component, @Repository). Starter provides spring-context as a
+        // transitive — no runtime cost beyond classpath visibility.
+        implementation 'org.springframework.boot:spring-boot-starter'
+
+        compileOnly         'org.projectlombok:lombok'
+        annotationProcessor 'org.projectlombok:lombok'
+
+        testImplementation platform('org.junit:junit-bom:5.10.2')
+        testImplementation 'org.junit.jupiter:junit-jupiter'
+        testImplementation 'org.assertj:assertj-core:3.25.3'
+        testImplementation 'org.mockito:mockito-core'
+        testImplementation 'org.mockito:mockito-junit-jupiter'
+        testRuntimeOnly    'org.junit.platform:junit-platform-launcher'
+    }
+
+    test {
+        useJUnitPlatform()
+    }
+
+    compileJava.options.encoding     = 'UTF-8'
+    compileTestJava.options.encoding = 'UTF-8'
 }
 
-dependencies {
-    implementation 'org.springframework.boot:spring-boot-starter-web'
-    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
-    runtimeOnly 'org.postgresql:postgresql'
+// =====================================================================
+// Per-module dependency wiring
+// =====================================================================
 
-    // Reed-Solomon is implemented self-contained in ErasureCodingService (no external dep needed)
+project(':obj-common')  { /* leaf — no deps */ }
+project(':obj-erasure') { /* leaf — no deps */ }
+project(':obj-routing') { /* leaf — no deps */ }
 
-    // Jackson (shardLocations JSON parse; spring-boot-starter-web includes this,
-    // but explicit pin keeps the dependency visible)
-    implementation 'com.fasterxml.jackson.core:jackson-databind'
-
-    // Flyway — schema version control (replaces ddl-auto: update)
-    implementation 'org.flywaydb:flyway-core'
-
-    // Lombok
-    compileOnly 'org.projectlombok:lombok'
-    annotationProcessor 'org.projectlombok:lombok'
-
-    // Testing
-    testImplementation 'org.springframework.boot:spring-boot-starter-test'
-    testImplementation 'org.testcontainers:postgresql'
+project(':obj-placement') {
+    dependencies {
+        api            project(':obj-common')
+        implementation project(':obj-routing')
+    }
 }
 
-tasks.named('test') {
-    useJUnitPlatform()
+project(':obj-storage') {
+    dependencies {
+        api            project(':obj-common')
+        implementation 'org.springframework.boot:spring-boot-starter'
+    }
 }
+
+project(':obj-metadata') {
+    dependencies {
+        api            project(':obj-common')
+        api            'org.springframework.boot:spring-boot-starter-data-jpa'
+        api            'org.postgresql:postgresql'
+        implementation 'org.flywaydb:flyway-core'
+    }
+}
+
+project(':obj-multipart') {
+    dependencies {
+        api            project(':obj-metadata')
+        implementation project(':obj-erasure')
+        implementation project(':obj-storage')
+        implementation project(':obj-routing')
+        implementation project(':obj-placement')
+        implementation 'org.springframework.boot:spring-boot-starter-web'
+        implementation 'com.fasterxml.jackson.core:jackson-databind'
+    }
+}
+
+project(':obj-gateway') {
+    dependencies {
+        api            project(':obj-common')
+        implementation project(':obj-erasure')
+        implementation project(':obj-routing')
+        implementation project(':obj-placement')
+        implementation project(':obj-storage')
+        implementation project(':obj-metadata')
+        implementation 'org.springframework.boot:spring-boot-starter-web'
+        implementation 'com.fasterxml.jackson.core:jackson-databind'
+    }
+}
+
+project(':obj-repair') {
+    dependencies {
+        api            project(':obj-common')
+        implementation project(':obj-erasure')
+        implementation project(':obj-storage')
+        implementation project(':obj-placement')
+        implementation project(':obj-metadata')
+        implementation 'org.springframework.boot:spring-boot-starter'
+        implementation 'com.fasterxml.jackson.core:jackson-databind'
+    }
+}
+
+project(':obj-scrubber') {
+    dependencies {
+        api            project(':obj-common')
+        implementation project(':obj-storage')
+        implementation project(':obj-metadata')
+        implementation project(':obj-repair')
+        implementation 'org.springframework.boot:spring-boot-starter'
+        implementation 'com.fasterxml.jackson.core:jackson-databind'
+    }
+}
+
+project(':obj-gc') {
+    dependencies {
+        api            project(':obj-common')
+        implementation project(':obj-storage')
+        implementation project(':obj-metadata')
+        implementation project(':obj-multipart')
+        implementation 'org.springframework.boot:spring-boot-starter'
+    }
+}
+
+// obj-gateway-app has its own build.gradle (Spring Boot plugin).

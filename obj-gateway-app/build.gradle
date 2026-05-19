@@ -1,0 +1,30 @@
+plugins {
+    id 'org.springframework.boot'
+    id 'io.spring.dependency-management'
+}
+
+// Disable the plain jar so we only produce the executable bootJar.
+jar     { enabled = false }
+bootJar { enabled = true; archiveClassifier = '' }
+
+dependencies {
+    implementation project(':obj-common')
+    implementation project(':obj-erasure')
+    implementation project(':obj-routing')
+    implementation project(':obj-placement')
+    implementation project(':obj-storage')
+    implementation project(':obj-metadata')
+    implementation project(':obj-multipart')
+    implementation project(':obj-gateway')
+    implementation project(':obj-scrubber')
+    implementation project(':obj-repair')
+    implementation project(':obj-gc')
+
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-data-jpa'
+    implementation 'org.flywaydb:flyway-core'
+    runtimeOnly  'org.postgresql:postgresql'
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'org.testcontainers:postgresql'
+}
