@@ -20,6 +20,28 @@ spring:
 server:
   port: 8080
 
+# Actuator + Prometheus scrape endpoint at /actuator/prometheus. The default
+# request-histogram percentiles produce the buckets that the Grafana dashboard
+# reads from.
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      probes:
+        enabled: true
+      show-details: when_authorized
+  metrics:
+    distribution:
+      percentiles-histogram:
+        http.server.requests: true
+  prometheus:
+    metrics:
+      export:
+        enabled: true
+
 # Storage node configuration — used by ConsistentHashRing
 storage:
   nodes: [1, 2, 3, 4, 5, 6]

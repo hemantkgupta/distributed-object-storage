@@ -54,6 +54,14 @@ subprojects {
 
     compileJava.options.encoding     = 'UTF-8'
     compileTestJava.options.encoding = 'UTF-8'
+
+    // Spring MVC's @PathVariable / @RequestParam fall back to reflection for
+    // parameter names when no explicit value is given (e.g. @PathVariable
+    // String bucket). The Spring Boot Gradle plugin sets `-parameters` only
+    // on the module that applies the plugin — controllers live in library
+    // modules here, so enable it for every subproject.
+    compileJava.options.compilerArgs += '-parameters'
+    compileTestJava.options.compilerArgs += '-parameters'
 }
 
 // =====================================================================

@@ -1,0 +1,12 @@
+.git
+.gradle
+build
+**/build
+**/.gradle
+**/.idea
+**/*.iml
+data
+docs
+raw-blog
+docker/grafana/data
+docker/prometheus/data

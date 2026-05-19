@@ -1,0 +1,11 @@
+# Mac-specific tweaks. Compose merges this on top of docker-compose.yml by
+# default — there's nothing to enable. Drop resource limits here if Docker
+# Desktop on Apple Silicon misbehaves under memory pressure.
+services:
+  gateway:
+    # Docker Desktop on Mac doesn't enforce ulimits the same way as Linux;
+    # keep them generous so JVM warm-up doesn't trip on open-file limits.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536

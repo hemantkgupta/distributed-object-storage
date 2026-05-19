@@ -1,7 +1,12 @@
-version: '3.8'
+name: distributed-object-storage
+
 services:
-  metadata-db:
-    image: postgres:15-alpine
+  # ───────────────────────────────────────────────────────────────────────────
+  # Metadata store — Postgres 16, persistent volume, healthcheck.
+  # ───────────────────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    container_name: dos-postgres
     environment:
       POSTGRES_DB: object_metadata
       POSTGRES_USER: objectadmin
@@ -9,7 +14,90 @@ services:
     ports:
       - "6432:5432"
     volumes:
-      - metadata_data:/var/lib/postgresql/data
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U objectadmin -d object_metadata"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Gateway — Spring Boot executable jar built from the local Dockerfile.
+  # The application reads storage.nodes / storage.base-path from application.yml
+  # and writes shards under ${user.dir}/data/storage-nodes/node-N — a named
+  # volume keeps shards across container restarts.
+  # ───────────────────────────────────────────────────────────────────────────
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: dos-gateway
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://postgres:5432/object_metadata
+      SPRING_DATASOURCE_USERNAME: objectadmin
+      SPRING_DATASOURCE_PASSWORD: objectpassword
+      SPRING_FLYWAY_URL: jdbc:postgresql://postgres:5432/object_metadata
+      SPRING_FLYWAY_USER: objectadmin
+      SPRING_FLYWAY_PASSWORD: objectpassword
+      MANAGEMENT_ENDPOINTS_WEB_EXPOSURE_INCLUDE: health,info,metrics,prometheus
+      # @Value("${storage.nodes}") on ConsistentHashRing expects a comma-separated
+      # string convertible to List<Integer>. The YAML list in application.yml
+      # flattens to indexed keys (storage.nodes[0], …) which the placeholder
+      # resolver cannot match, so explicitly override via env var.
+      STORAGE_NODES: 1,2,3,4,5,6
+    ports:
+      - "8080:8080"
+    volumes:
+      - storage-nodes-data:/app/data/storage-nodes
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://localhost:8080/actuator/health | grep -q 'UP' || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 30s
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Prometheus — scrapes gateway's actuator/prometheus endpoint every 15s.
+  # ───────────────────────────────────────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: dos-prometheus
+    depends_on:
+      - gateway
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Grafana — pre-provisioned with Prometheus datasource and one dashboard.
+  # Default admin/admin (override via GF_SECURITY_ADMIN_PASSWORD).
+  # ───────────────────────────────────────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: dos-grafana
+    depends_on:
+      - prometheus
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      GF_USERS_ALLOW_SIGN_UP: "false"
+    volumes:
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
 
 volumes:
-  metadata_data:
+  postgres-data:
+  storage-nodes-data:
+  prometheus-data:
+  grafana-data:
